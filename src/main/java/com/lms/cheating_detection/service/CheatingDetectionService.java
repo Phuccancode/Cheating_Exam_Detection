@@ -4,13 +4,13 @@ import com.lms.cheating_detection.model.SuspiciousActivity;
 import com.lms.cheating_detection.repository.SuspiciousActivityRepository;
 import jakarta.annotation.PostConstruct;
 
-import org.opencv.core.Mat;
-import org.opencv.core.MatOfRect;
-import org.opencv.core.Rect;
+import lombok.extern.slf4j.Slf4j;
+import org.opencv.core.*;
 import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
 import org.opencv.objdetect.CascadeClassifier;
 import org.opencv.videoio.VideoCapture;
+import org.opencv.videoio.Videoio;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,16 +30,17 @@ import java.util.Map;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 public class CheatingDetectionService {
-
-    private static final Logger log = LoggerFactory.getLogger(CheatingDetectionService.class);
 
     private static final int CAPTURE_INTERVAL = 5000; // 5 seconds
     private final SuspiciousActivityRepository suspiciousActivityRepository;
     private Map<String, VideoCapture> studentCaptures = new ConcurrentHashMap<>();
     private Map<String, ScheduledFuture<?>> monitoringTasks = new ConcurrentHashMap<>();
-    private ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(10);
+    private ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(
+            Math.min(100, Runtime.getRuntime().availableProcessors() * 2)
+    );
     private CascadeClassifier faceCascade;
     private CascadeClassifier eyesCascade;
 
@@ -114,6 +115,8 @@ public class CheatingDetectionService {
                 log.error("Failed to open webcam for session: {}", sessionId);
                 throw new RuntimeException("Cannot open webcam");
             }
+            videoCapture.set(Videoio.CAP_PROP_FRAME_WIDTH, 640);  // Giảm từ 1280 xuống 640
+            videoCapture.set(Videoio.CAP_PROP_FRAME_HEIGHT, 480); // Giảm từ 720 xuống 480
 
             studentCaptures.put(sessionId, videoCapture);
 
@@ -152,26 +155,47 @@ public class CheatingDetectionService {
             return;
         }
 
+        Mat frame = null;
+        Mat grayFrame = null;
+        Mat smallFrame = null;
+        MatOfRect faces = null;
         try {
-            Mat frame = new Mat();
-            videoCapture.read(frame);
-
-            if (frame.empty()) {
+            frame = new Mat();
+            if (!videoCapture.read(frame) || frame.empty()) {
                 log.error("Empty frame captured for session: {}", sessionId);
                 return;
             }
 
             // Convert to grayscale for detection
-            Mat grayFrame = new Mat();
+            grayFrame = new Mat();
             Imgproc.cvtColor(frame, grayFrame, Imgproc.COLOR_BGR2GRAY);
-            Imgproc.equalizeHist(grayFrame, grayFrame);
 
+            // Tạo phiên bản thu nhỏ để xử lý nhanh hơn
+            smallFrame = new Mat();
+            Imgproc.resize(grayFrame, smallFrame, new Size(), 0.5, 0.5);
+            Imgproc.equalizeHist(smallFrame, smallFrame);
+
+            faces = new MatOfRect();
             // Detect faces
-            MatOfRect faces = new MatOfRect();
-            faceCascade.detectMultiScale(grayFrame, faces);
+            faceCascade.detectMultiScale(
+                    smallFrame,
+                    faces,
+                    1.2,        // Tăng scaleFactor để cải thiện tốc độ
+                    5,          // Tăng minNeighbors để giảm false positives
+                    0,
+                    new Size(30, 30),  // Kích thước mặt tối thiểu với khung hình thu nhỏ
+                    new Size()
+            );
 
             Rect[] facesArray = faces.toArray();
 
+            // Điều chỉnh lại tọa độ khuôn mặt cho kích thước gốc
+            for (Rect rect : facesArray) {
+                rect.x *= 2;
+                rect.y *= 2;
+                rect.width *= 2;
+                rect.height *= 2;
+            }
             boolean suspiciousActivity = false;
             String description = null;
             String evidenceType = null;
@@ -189,47 +213,79 @@ public class CheatingDetectionService {
                 suspiciousActivity = true;
             }
             else {
-                // For the detected face, check if eyes are visible
+                // Khi chỉ phát hiện một khuôn mặt
                 Rect faceRect = facesArray[0];
-                Mat faceROI = grayFrame.submat(faceRect);
 
-                MatOfRect eyes = new MatOfRect();
-                eyesCascade.detectMultiScale(faceROI, eyes);
+                // Kiểm tra phần ROI (region of interest) của khuôn mặt
+                if (faceRect.x >= 0 && faceRect.y >= 0 &&
+                        faceRect.x + faceRect.width < grayFrame.width() &&
+                        faceRect.y + faceRect.height < grayFrame.height()) {
 
-                if (eyes.toArray().length == 0) {
-                    description = "No eyes detected - student may be looking away";
-                    evidenceType = "no_eyes";
-                    suspiciousActivity = true;
-                }
-                else {
-                    // Check face position (if face is not centered, student might be looking away)
-                    double frameCenter = frame.width() / 2.0;
-                    double faceCenter = faceRect.x + (faceRect.width / 2.0);
+                    Mat faceROI = null;
+                    MatOfRect eyes = null;
 
-                    if (Math.abs(frameCenter - faceCenter) > (frame.width() * 0.2)) {  // If face is more than 20% off center
-                        description = "Face not centered - student may be looking to the side";
-                        evidenceType = "face_off_center";
-                        suspiciousActivity = true;
+                    try {
+                        // Chỉ phân tích vùng khuôn mặt (ROI) để tiết kiệm tài nguyên
+                        faceROI = grayFrame.submat(faceRect);
+                        eyes = new MatOfRect();
+
+                        // Tối ưu tham số phát hiện mắt
+                        eyesCascade.detectMultiScale(
+                                faceROI,
+                                eyes,
+                                1.1,
+                                3,
+                                0,
+                                new Size(15, 15),
+                                new Size()
+                        );
+
+                        if (eyes.toArray().length == 0) {
+                            description = "No eyes detected - student may be looking away";
+                            evidenceType = "no_eyes";
+                            suspiciousActivity = true;
+                        }
+                        else {
+                            // Kiểm tra vị trí khuôn mặt
+                            double frameCenter = grayFrame.width() / 2.0;
+                            double faceCenter = faceRect.x + (faceRect.width / 2.0);
+
+                            // Nếu mặt lệch khỏi trung tâm quá 20%
+                            if (Math.abs(frameCenter - faceCenter) > (grayFrame.width() * 0.2)) {
+                                description = "Face not centered - student may be looking to the side";
+                                evidenceType = "face_off_center";
+                                suspiciousActivity = true;
+                            }
+                        }
+                    } finally {
+                        // Giải phóng tài nguyên của ROI
+                        if (faceROI != null) faceROI.release();
+                        if (eyes != null) eyes.release();
                     }
                 }
-
-                // Release resources
-                faceROI.release();
-                eyes.release();
             }
 
             if (suspiciousActivity) {
-                String evidencePath = saveFrame(frame, sessionId, evidenceType);
-                logSuspiciousActivity(sessionId, examId, description, evidencePath);
-            }
+                // Lưu hình ảnh có độ phân giải thấp hơn làm bằng chứng để tiết kiệm không gian
+                Mat evidenceFrame = new Mat();
+                Imgproc.resize(frame, evidenceFrame, new Size(640, 480));
 
-            // Free resources
-            frame.release();
-            grayFrame.release();
-            faces.release();
+                try {
+                    String evidencePath = saveFrame(evidenceFrame, sessionId, evidenceType);
+                    logSuspiciousActivity(sessionId, examId, description, evidencePath);
+                } finally {
+                    evidenceFrame.release();
+                }
+            }
 
         } catch (Exception e) {
             log.error("Error analyzing webcam frame for session: {}", sessionId, e);
+        } finally {
+            // Đảm bảo giải phóng tất cả tài nguyên Mat
+            if (frame != null) frame.release();
+            if (grayFrame != null) grayFrame.release();
+            if (smallFrame != null) smallFrame.release();
+            if (faces != null) faces.release();
         }
     }
 
@@ -250,15 +306,26 @@ public class CheatingDetectionService {
         }
     }
 
+    // Phương thức saveFrame() tối ưu hóa
     private String saveFrame(Mat frame, String sessionId, String type) {
         try {
             String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
             String filename = String.format("evidence_%s_%s_%s.jpg", sessionId, type, timestamp);
             String path = evidenceFolder + File.separator + filename;
 
-            Imgcodecs.imwrite(path, frame);
-            log.info("Saved evidence frame to: {}", path);
-            return path;
+            // Tối ưu chất lượng JPEG để tiết kiệm dung lượng
+            MatOfInt compressionParams = new MatOfInt(
+                    Imgcodecs.IMWRITE_JPEG_QUALITY,
+                    70  // Chất lượng 70% thay vì mặc định 95%
+            );
+
+            try {
+                Imgcodecs.imwrite(path, frame, compressionParams);
+                log.info("Saved optimized evidence frame to: {}", path);
+                return path;
+            } finally {
+                compressionParams.release();
+            }
         } catch (Exception e) {
             log.error("Error saving evidence frame for session: {}", sessionId, e);
             return null;

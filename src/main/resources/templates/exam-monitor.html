@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exam Monitoring</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .webcam-container {
+            position: relative;
+            width: 320px;
+            height: 240px;
+            margin: 0 auto;
+        }
+        .webcam-video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .status-indicator {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background-color: red;
+        }
+        .status-indicator.active {
+            background-color: green;
+        }
+        #alerts-container {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        #alerts-container .alert {
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+<div class="container mt-5">
+    <h1 class="text-center mb-4">Exam Monitoring System</h1>
+
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0">Webcam Monitor</h5>
+                </div>
+                <div class="card-body">
+                    <div class="webcam-container mb-3">
+                        <video id="webcam-video" class="webcam-video" autoplay playsinline></video>
+                        <div id="status-indicator" class="status-indicator"></div>
+                    </div>
+                    <div class="d-flex justify-content-center">
+                        <button id="start-btn" class="btn btn-success me-2">Start Monitoring</button>
+                        <button id="stop-btn" class="btn btn-danger" disabled>Stop Monitoring</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header bg-warning">
+                    <h5 class="mb-0">Suspicious Activities</h5>
+                </div>
+                <div class="card-body">
+                    <div id="alerts-container">
+                        <div class="alert alert-info">Monitoring not started. Click "Start Monitoring" to begin.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    // Biến toàn cục
+    let stream = null;
+    let isMonitoring = false;
+    let captureInterval = null;
+    let sessionId = null;
+    let examId = 'exam-123'; // Thay thế bằng ID bài thi thực tế
+
+    // DOM Elements
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const statusIndicator = document.getElementById('status-indicator');
+    const webcamVideo = document.getElementById('webcam-video');
+    const alertsContainer = document.getElementById('alerts-container');
+
+    // Hàm khởi tạo
+    function init() {
+        startBtn.addEventListener('click', startMonitoring);
+        stopBtn.addEventListener('click', stopMonitoring);
+
+        // Tạo sessionId duy nhất cho mỗi phiên
+        sessionId = 'session-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+    }
+
+    // Hàm bắt đầu giám sát
+    async function startMonitoring() {
+        try {
+            // Yêu cầu quyền truy cập camera
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 640, height: 480 },
+                audio: false
+            });
+
+            // Hiển thị video stream
+            webcamVideo.srcObject = stream;
+
+            // Đăng ký phiên với server
+            const response = await fetch(`/api/client-monitoring/start?sessionId=${sessionId}&examId=${examId}`, {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to register monitoring session with server');
+            }
+
+            // Cập nhật UI
+            isMonitoring = true;
+            statusIndicator.classList.add('active');
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+
+            // Thêm thông báo
+            addAlert('info', 'Monitoring started successfully');
+
+            // Bắt đầu chụp và gửi khung hình định kỳ
+            captureInterval = setInterval(captureAndSendFrame, 1000);
+
+        } catch (error) {
+            console.error('Error starting monitoring:', error);
+            addAlert('danger', `Error starting monitoring: ${error.message}`);
+        }
+    }
+
+    // Hàm dừng giám sát
+    async function stopMonitoring() {
+        try {
+            // Dừng capture interval
+            if (captureInterval) {
+                clearInterval(captureInterval);
+                captureInterval = null;
+            }
+
+            // Dừng video stream
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                webcamVideo.srcObject = null;
+                stream = null;
+            }
+
+            // Thông báo cho server
+            await fetch(`/api/client-monitoring/stop?sessionId=${sessionId}`, {
+                method: 'POST'
+            });
+
+            // Cập nhật UI
+            isMonitoring = false;
+            statusIndicator.classList.remove('active');
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+
+            // Thêm thông báo
+            addAlert('info', 'Monitoring stopped');
+
+        } catch (error) {
+            console.error('Error stopping monitoring:', error);
+            addAlert('danger', `Error stopping monitoring: ${error.message}`);
+        }
+    }
+
+    // Hàm chụp và gửi khung hình
+    async function captureAndSendFrame() {
+        if (!isMonitoring || !stream) return;
+
+        try {
+            // Chụp khung hình từ video
+            const canvas = document.createElement('canvas');
+            canvas.width = webcamVideo.videoWidth;
+            canvas.height = webcamVideo.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(webcamVideo, 0, 0, canvas.width, canvas.height);
+
+            // Chuyển đổi thành blob
+            const blob = await new Promise(resolve => {
+                canvas.toBlob(resolve, 'image/jpeg', 0.7); // 70% chất lượng
+            });
+
+            // Tạo FormData để gửi đi
+            const formData = new FormData();
+            formData.append('sessionId', sessionId);
+            formData.append('examId', examId);
+            formData.append('image', blob, 'frame.jpg');
+
+            // Gửi lên server
+            const response = await fetch('/api/client-monitoring/analyze', {
+                method: 'POST',
+                body: formData
+            });
+
+            const result = await response.json();
+
+            // Kiểm tra kết quả
+            if (result.message.includes('Suspicious activity detected')) {
+                addAlert('warning', 'Suspicious activity detected! The system will record this incident.');
+            }
+
+        } catch (error) {
+            console.error('Error capturing or sending frame:', error);
+        }
+    }
+
+    // Thêm thông báo mới vào container
+    function addAlert(type, message) {
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert alert-${type}`;
+        alertDiv.innerHTML = `
+                <div>${message}</div>
+                <small>${new Date().toLocaleTimeString()}</small>
+            `;
+        alertsContainer.prepend(alertDiv);
+
+        // Giới hạn số lượng thông báo
+        if (alertsContainer.children.length > 10) {
+            alertsContainer.lastChild.remove();
+        }
+    }
+
+    // Khởi tạo khi trang được tải
+    document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

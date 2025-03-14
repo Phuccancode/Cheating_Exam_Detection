@@ -8,6 +8,6 @@ public class ExamMonitoringViewController {
 
     @GetMapping("/exam-monitor")
     public String examMonitorPage() {
-        return "exam-monitor"; // trỏ đến exam-monitor.html
+        return "exam-monitor-enhanced"; // trỏ đến exam-monitor.html
     }
 }

@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Exam Monitoring</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- MediaPipe Face Mesh -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+    <style>
+        .webcam-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            margin: 0 auto;
+        }
+        .webcam-video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror image */
+        }
+        .overlay-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1); /* Match mirror image */
+        }
+        .status-indicator {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background-color: red;
+        }
+        .status-indicator.active {
+            background-color: green;
+        }
+        #alerts-container {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        #alerts-container .alert {
+            margin-bottom: 10px;
+        }
+        .detection-info {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+<div class="container mt-5">
+    <h1 class="text-center mb-4">Advanced Exam Monitoring System</h1>
+
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header bg-primary text-white">
+                    <h5 class="mb-0">Face and Eye Tracking Monitor</h5>
+                </div>
+                <div class="card-body">
+                    <div class="webcam-container mb-3">
+                        <video id="webcam-video" class="webcam-video" autoplay playsinline></video>
+                        <canvas id="overlay-canvas" class="overlay-canvas"></canvas>
+                        <div id="status-indicator" class="status-indicator"></div>
+                    </div>
+                    <div class="detection-info">
+                        <div id="head-pose-info">Head Pose: Calculating...</div>
+                        <div id="eye-gaze-info">Eye Gaze: Calculating...</div>
+                    </div>
+                    <div class="d-flex justify-content-center mt-3">
+                        <button id="start-btn" class="btn btn-success me-2">Start Monitoring</button>
+                        <button id="stop-btn" class="btn btn-danger" disabled>Stop Monitoring</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-4">
+            <div class="card">
+                <div class="card-header bg-warning">
+                    <h5 class="mb-0">Suspicious Activities</h5>
+                </div>
+                <div class="card-body">
+                    <div id="alerts-container">
+                        <div class="alert alert-info">Monitoring not started. Click "Start Monitoring" to begin.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    // Global variables
+    let stream = null;
+    let isMonitoring = false;
+    let serverCaptureInterval = null;
+    let sessionId = null;
+    let examId = 'exam-123'; // Replace with actual exam ID
+    let faceMesh = null;
+    let camera = null;
+
+    // DOM Elements
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const statusIndicator = document.getElementById('status-indicator');
+    const webcamVideo = document.getElementById('webcam-video');
+    const overlayCanvas = document.getElementById('overlay-canvas');
+    const alertsContainer = document.getElementById('alerts-container');
+    const headPoseInfo = document.getElementById('head-pose-info');
+    const eyeGazeInfo = document.getElementById('eye-gaze-info');
+
+    // Canvas context
+    const canvasCtx = overlayCanvas.getContext('2d');
+
+    // Face landmark indices
+    const LEFT_EYE_INDICES = [33, 133, 160, 159, 158, 157, 173, 155, 154, 153, 145, 144, 163, 7]; // Left eye contour
+    const RIGHT_EYE_INDICES = [362, 263, 466, 388, 387, 386, 385, 384, 398, 382, 381, 380, 374, 373]; // Right eye contour
+    const LEFT_IRIS_INDICES = [468, 469, 470, 471, 472]; // Left iris
+    const RIGHT_IRIS_INDICES = [473, 474, 475, 476, 477]; // Right iris
+
+    // Initialization function
+    function init() {
+        startBtn.addEventListener('click', startMonitoring);
+        stopBtn.addEventListener('click', stopMonitoring);
+
+        // Generate unique sessionId
+        sessionId = 'session-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+
+        // Set canvas dimensions
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        // Initialize MediaPipe Face Mesh
+        initFaceMesh();
+    }
+
+    function resizeCanvas() {
+        overlayCanvas.width = webcamVideo.clientWidth;
+        overlayCanvas.height = webcamVideo.clientHeight;
+    }
+
+    function initFaceMesh() {
+        faceMesh = new FaceMesh({
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+            }
+        });
+
+        faceMesh.setOptions({
+            maxNumFaces: 1,
+            refineLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        faceMesh.onResults(onFaceMeshResults);
+    }
+
+    // Start monitoring function
+    async function startMonitoring() {
+        try {
+            // Request camera access
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 640, height: 480 },
+                audio: false
+            });
+
+            // Display video stream
+            webcamVideo.srcObject = stream;
+
+            // Wait for video metadata to load
+            await new Promise(resolve => {
+                webcamVideo.onloadedmetadata = () => {
+                    resolve();
+                };
+            });
+
+            // Update canvas dimensions
+            resizeCanvas();
+
+            // Initialize camera utility for FaceMesh
+            camera = new Camera(webcamVideo, {
+                onFrame: async () => {
+                    await faceMesh.send({image: webcamVideo});
+                },
+                width: 640,
+                height: 480
+            });
+            camera.start();
+
+            // Register session with server
+            const response = await fetch(`/api/client-monitoring/start?sessionId=${sessionId}&examId=${examId}`, {
+                method: 'POST'
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to register monitoring session with server');
+            }
+
+            // Update UI
+            isMonitoring = true;
+            statusIndicator.classList.add('active');
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+
+            // Add alert
+            addAlert('info', 'Advanced face monitoring started successfully');
+
+            // Start sending frames to server periodically (every 2 seconds)
+            serverCaptureInterval = setInterval(captureAndSendFrame, 2000);
+
+        } catch (error) {
+            console.error('Error starting monitoring:', error);
+            addAlert('danger', `Error starting monitoring: ${error.message}`);
+        }
+    }
+
+    // Stop monitoring function
+    async function stopMonitoring() {
+        try {
+            // Stop intervals
+            if (serverCaptureInterval) {
+                clearInterval(serverCaptureInterval);
+                serverCaptureInterval = null;
+            }
+
+            // Stop MediaPipe camera
+            if (camera) {
+                camera.stop();
+            }
+
+            // Stop video stream
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                webcamVideo.srcObject = null;
+                stream = null;
+            }
+
+            // Notify server
+            await fetch(`/api/client-monitoring/stop?sessionId=${sessionId}`, {
+                method: 'POST'
+            });
+
+            // Update UI
+            isMonitoring = false;
+            statusIndicator.classList.remove('active');
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+
+            // Clear canvas
+            canvasCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+            headPoseInfo.textContent = 'Head Pose: Monitoring stopped';
+            eyeGazeInfo.textContent = 'Eye Gaze: Monitoring stopped';
+
+            // Add alert
+            addAlert('info', 'Monitoring stopped');
+
+        } catch (error) {
+            console.error('Error stopping monitoring:', error);
+            addAlert('danger', `Error stopping monitoring: ${error.message}`);
+        }
+    }
+
+    // Handle MediaPipe face mesh results
+    function onFaceMeshResults(results) {
+        // Clear canvas
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+        if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+            // Get the first face
+            const landmarks = results.multiFaceLandmarks[0];
+
+            // Draw face mesh connections
+            canvasCtx.lineWidth = 1;
+            canvasCtx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+
+            // Draw eyes
+            drawConnectors(canvasCtx, landmarks, FACEMESH_LEFT_EYE, {color: '#30FF30'});
+            drawConnectors(canvasCtx, landmarks, FACEMESH_RIGHT_EYE, {color: '#30FF30'});
+
+            // Draw iris if refined landmarks are available
+            if (landmarks[LEFT_IRIS_INDICES[0]]) {
+                drawIris(canvasCtx, landmarks, LEFT_IRIS_INDICES, overlayCanvas.width, overlayCanvas.height);
+                drawIris(canvasCtx, landmarks, RIGHT_IRIS_INDICES, overlayCanvas.width, overlayCanvas.height);
+            }
+
+            // Estimate head pose
+            const headPose = estimateHeadPose(landmarks);
+            headPoseInfo.textContent = `Head Pose: Yaw ${headPose.yaw.toFixed(1)}°, Pitch ${headPose.pitch.toFixed(1)}°, Roll ${headPose.roll.toFixed(1)}°`;
+
+            // Estimate eye gaze
+            const eyeGaze = estimateEyeGaze(landmarks);
+            eyeGazeInfo.textContent = `Eye Gaze: Left ${getGazeDirection(eyeGaze.left)}, Right ${getGazeDirection(eyeGaze.right)}`;
+
+            // Check for suspicious activity
+            checkSuspiciousActivity(headPose, eyeGaze);
+        } else {
+            headPoseInfo.textContent = 'Head Pose: No face detected';
+            eyeGazeInfo.textContent = 'Eye Gaze: No face detected';
+
+            if (isMonitoring) {
+                addAlert('warning', 'No face detected - student may be absent');
+            }
+        }
+
+        canvasCtx.restore();
+    }
+
+    // Draw iris
+    function drawIris(ctx, landmarks, irisIndices, width, height) {
+        // Calculate center of iris
+        const centerX = landmarks[irisIndices[0]].x * width;
+        const centerY = landmarks[irisIndices[0]].y * height;
+
+        // Draw iris circle
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = 'blue';
+        ctx.fill();
+    }
+
+    // Estimate head pose from face landmarks
+    function estimateHeadPose(landmarks) {
+        // Get key facial landmarks
+        const nose = landmarks[4];
+        const leftEye = landmarks[33];
+        const rightEye = landmarks[263];
+        const leftCheek = landmarks[206];
+        const rightCheek = landmarks[426];
+        const mouthCenter = landmarks[13];
+
+        // Yaw (left-right rotation) - compare the width ratio of left and right face
+        const eyeDistance = distance3D(leftEye, rightEye);
+        const leftRatio = distance3D(nose, leftEye) / eyeDistance;
+        const rightRatio = distance3D(nose, rightEye) / eyeDistance;
+        const yawRatio = leftRatio / rightRatio;
+        const yaw = (yawRatio - 1) * 45; // Scale to roughly -45 to +45 degrees
+
+        // Pitch (up-down rotation) - using nose and mouth position
+        const eyeMidpoint = {
+            y: (leftEye.y + rightEye.y) / 2
+        };
+
+        const noseToEyes = nose.y - eyeMidpoint.y;
+        const noseToMouth = mouthCenter.y - nose.y;
+        const pitchRatio = noseToEyes / noseToMouth;
+        const pitch = (pitchRatio - 0.65) * 45; // Normalized to approximately -45 to +45 degrees
+
+        // Roll (tilting head) - angle between eyes
+        const dY = rightEye.y - leftEye.y;
+        const dX = rightEye.x - leftEye.x;
+        const roll = Math.atan2(dY, dX) * 180 / Math.PI;
+
+        return { yaw, pitch, roll };
+    }
+
+    // Estimate eye gaze direction from landmarks
+    function estimateEyeGaze(landmarks) {
+        // Get eye landmarks
+        const leftEyePoints = {
+            center: landmarks[468], // Left eye center (iris)
+            left: landmarks[33],   // Left eye left corner
+            right: landmarks[133], // Left eye right corner
+            top: landmarks[159],   // Left eye top
+            bottom: landmarks[145] // Left eye bottom
+        };
+
+        const rightEyePoints = {
+            center: landmarks[473], // Right eye center (iris)
+            left: landmarks[362],   // Right eye left corner
+            right: landmarks[263],  // Right eye right corner
+            top: landmarks[386],    // Right eye top
+            bottom: landmarks[374]  // Right eye bottom
+        };
+
+        // Calculate horizontal and vertical gaze direction for left eye
+        const leftHorizontalGaze = calculateNormalizedPosition(
+            leftEyePoints.center.x,
+            leftEyePoints.left.x,
+            leftEyePoints.right.x
+        );
+
+        const leftVerticalGaze = calculateNormalizedPosition(
+            leftEyePoints.center.y,
+            leftEyePoints.top.y,
+            leftEyePoints.bottom.y
+        );
+
+        // Calculate horizontal and vertical gaze direction for right eye
+        const rightHorizontalGaze = calculateNormalizedPosition(
+            rightEyePoints.center.x,
+            rightEyePoints.left.x,
+            rightEyePoints.right.x
+        );
+
+        const rightVerticalGaze = calculateNormalizedPosition(
+            rightEyePoints.center.y,
+            rightEyePoints.top.y,
+            rightEyePoints.bottom.y
+        );
+
+        return {
+            left: { horizontal: leftHorizontalGaze, vertical: leftVerticalGaze },
+            right: { horizontal: rightHorizontalGaze, vertical: rightVerticalGaze }
+        };
+    }
+
+    // Calculate normalized position (0 is center, -1 is left/top, 1 is right/bottom)
+    function calculateNormalizedPosition(value, min, max) {
+        // Ensure min is smaller than max
+        if (min > max) {
+            [min, max] = [max, min];
+        }
+
+        const center = (min + max) / 2;
+        const range = max - min;
+
+        // Prevent division by zero
+        if (range === 0) return 0;
+
+        return ((value - center) / (range / 2)) * 2;
+    }
+
+    // Get human-readable gaze direction
+    function getGazeDirection(gaze) {
+        const h = gaze.horizontal;
+        const v = gaze.vertical;
+
+        let hDir = "center";
+        if (h < -0.2) hDir = "left";
+        else if (h > 0.2) hDir = "right";
+
+        let vDir = "center";
+        if (v < -0.2) vDir = "up";
+        else if (v > 0.2) vDir = "down";
+
+        if (hDir === "center" && vDir === "center") return "center";
+        return `${vDir}-${hDir}`;
+    }
+
+    // Check for suspicious activity based on head pose and eye gaze
+    function checkSuspiciousActivity(headPose, eyeGaze) {
+        if (!isMonitoring) return;
+
+        // Check if head is turned significantly
+        const isHeadTurned = Math.abs(headPose.yaw) > 30 || Math.abs(headPose.pitch) > 20;
+
+        // Check if eyes are looking to the side
+        const isLookingAside = Math.abs(eyeGaze.left.horizontal) > 0.3 ||
+            Math.abs(eyeGaze.right.horizontal) > 0.3;
+
+        // Combined check: if both head and eyes are looking in same direction
+        const isCombinedSuspicious =
+            (headPose.yaw > 15 && eyeGaze.left.horizontal > 0.2 && eyeGaze.right.horizontal > 0.2) ||
+            (headPose.yaw < -15 && eyeGaze.left.horizontal < -0.2 && eyeGaze.right.horizontal < -0.2);
+
+        // Check for straight head but eyes looking sideways
+        const isSuspiciousEyeOnly =
+            (Math.abs(headPose.yaw) < 10 &&
+                (Math.abs(eyeGaze.left.horizontal) > 0.4 || Math.abs(eyeGaze.right.horizontal) > 0.4));
+
+        // Determine if suspicious activity is occurring
+        if (isHeadTurned) {
+            const direction = headPose.yaw > 0 ? "right" : "left";
+            addAlert('warning', `Head turned ${direction} - student may be looking away`);
+        }
+        else if (isCombinedSuspicious) {
+            const direction = headPose.yaw > 0 ? "right" : "left";
+            addAlert('danger', `Head and eyes both looking ${direction} - likely looking at unauthorized materials`);
+        }
+        else if (isSuspiciousEyeOnly) {
+            const direction = (eyeGaze.left.horizontal + eyeGaze.right.horizontal) > 0 ? "right" : "left";
+            addAlert('warning', `Eyes looking ${direction} while head is straight - suspicious eye movement`);
+        }
+    }
+
+    // Calculate 3D distance between points
+    function distance3D(point1, point2) {
+        return Math.sqrt(
+            Math.pow(point1.x - point2.x, 2) +
+            Math.pow(point1.y - point2.y, 2) +
+            Math.pow(point1.z - point2.z, 2)
+        );
+    }
+
+    // Capture and send frame to server
+    async function captureAndSendFrame() {
+        if (!isMonitoring || !stream) return;
+
+        try {
+            // Create a snapshot from the video
+            const canvas = document.createElement('canvas');
+            canvas.width = webcamVideo.videoWidth;
+            canvas.height = webcamVideo.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(webcamVideo, 0, 0, canvas.width, canvas.height);
+
+            // Convert to blob
+            const blob = await new Promise(resolve => {
+                canvas.toBlob(resolve, 'image/jpeg', 0.7); // 70% quality
+            });
+
+            // Create FormData to send
+            const formData = new FormData();
+            formData.append('sessionId', sessionId);
+            formData.append('examId', examId);
+            formData.append('image', blob, 'frame.jpg');
+
+            // Send to server
+            const response = await fetch('/api/client-monitoring/analyze', {
+                method: 'POST',
+                body: formData
+            });
+
+            const result = await response.json();
+
+            // Check result
+            if (result.message.includes('Suspicious activity detected')) {
+                addAlert('warning', 'Server detected suspicious activity! This incident will be recorded.');
+            }
+
+        } catch (error) {
+            console.error('Error capturing or sending frame:', error);
+        }
+    }
+
+    // Add new alert to container
+    function addAlert(type, message) {
+        const now = new Date();
+
+        // Check if the same alert was added in the last 5 seconds
+        const alertElements = alertsContainer.querySelectorAll('.alert');
+        for (let i = 0; i < alertElements.length; i++) {
+            const alertTime = parseInt(alertElements[i].dataset.time || '0');
+            const alertMessage = alertElements[i].dataset.message || '';
+
+            if (alertMessage === message && (now.getTime() - alertTime < 5000)) {
+                return; // Skip duplicate alerts within 5 seconds
+            }
+        }
+
+        const alertDiv = document.createElement('div');
+        alertDiv.className = `alert alert-${type}`;
+        alertDiv.dataset.time = now.getTime().toString();
+        alertDiv.dataset.message = message;
+
+        alertDiv.innerHTML = `
+            <div>${message}</div>
+            <small>${now.toLocaleTimeString()}</small>
+        `;
+
+        alertsContainer.prepend(alertDiv);
+
+        // Limit to 10 alerts
+        if (alertsContainer.children.length > 10) {
+            alertsContainer.lastChild.remove();
+        }
+    }
+
+    // Initialize when page loads
+    document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

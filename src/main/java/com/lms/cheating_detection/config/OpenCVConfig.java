@@ -10,7 +10,6 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.concurrent.TimeUnit;
 
 @Component
 public class OpenCVConfig {
@@ -20,20 +19,23 @@ public class OpenCVConfig {
     @Value("${mediapipe.model.directory:models}")
     private String modelDirectory;
 
-    @Value("${opencv.loading.method:auto}")
-    private String opencvLoadingMethod;
-
     @PostConstruct
     public void loadLibraries() {
         try {
-            // Load OpenCV with retry and multiple methods
-            boolean loaded = loadOpenCVWithRetry();
+            log.info("Starting OpenCV initialization...");
 
-            if (!loaded) {
-                throw new RuntimeException("Failed to load OpenCV after multiple attempts");
-            }
-
+            // Load OpenCV using nu.pattern library
+            nu.pattern.OpenCV.loadLocally();
             log.info("OpenCV loaded successfully.");
+
+            // Print OpenCV details
+            try {
+                String version = org.opencv.core.Core.VERSION;
+                String nativePath = org.opencv.core.Core.NATIVE_LIBRARY_NAME;
+                log.info("OpenCV Version: {}, Native Library: {}", version, nativePath);
+            } catch (Exception e) {
+                log.warn("Could not print OpenCV details: {}", e.getMessage());
+            }
 
             // Create models directory if it doesn't exist
             File directory = new File(modelDirectory);
@@ -46,82 +48,13 @@ public class OpenCVConfig {
             createModelSubdirectories();
 
         } catch (UnsatisfiedLinkError e) {
-            log.error("Failed to load OpenCV library.", e);
+            log.error("Failed to load OpenCV library: {}", e.getMessage());
+            log.error("Java library path: {}", System.getProperty("java.library.path"));
+            log.error("LD_LIBRARY_PATH: {}", System.getenv("LD_LIBRARY_PATH"));
             throw new RuntimeException("Failed to load OpenCV library.", e);
         } catch (Exception e) {
             log.error("Error during library initialization", e);
             throw new RuntimeException("Error during library initialization", e);
-        }
-    }
-
-    private boolean loadOpenCVWithRetry() {
-        // Try up to 3 times with different methods
-        for (int attempt = 1; attempt <= 3; attempt++) {
-            try {
-                log.info("OpenCV loading attempt #{}", attempt);
-
-                if ("system".equalsIgnoreCase(opencvLoadingMethod)) {
-                    // Try loading from system paths
-                    System.loadLibrary("opencv_java");
-                    log.info("OpenCV loaded from system library paths");
-                    return true;
-                } else if ("manual".equalsIgnoreCase(opencvLoadingMethod)) {
-                    // Try specific paths that might exist in Docker container
-                    String[] possiblePaths = {
-                            "/usr/local/share/java/opencv4/libopencv_java.so",
-                            "/usr/lib/jni/libopencv_java.so",
-                            "/usr/lib/x86_64-linux-gnu/libopencv_java.so"
-                    };
-
-                    for (String path : possiblePaths) {
-                        try {
-                            if (new File(path).exists()) {
-                                System.load(path);
-                                log.info("OpenCV loaded from {}", path);
-                                return true;
-                            }
-                        } catch (Exception e) {
-                            log.debug("Failed to load from {}: {}", path, e.getMessage());
-                        }
-                    }
-
-                    log.warn("Could not find OpenCV library in standard locations");
-                } else {
-                    // Default method - use nu.pattern.OpenCV
-                    log.info("Loading OpenCV using nu.pattern.OpenCV.loadLocally()");
-                    nu.pattern.OpenCV.loadLocally();
-                    logOpenCVInfo();
-                    return true;
-                }
-            } catch (Exception e) {
-                log.warn("OpenCV loading attempt #{} failed: {}", attempt, e.getMessage());
-
-                if (attempt < 3) {
-                    try {
-                        // Wait a bit before retrying
-                        TimeUnit.SECONDS.sleep(2);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private void logOpenCVInfo() {
-        try {
-            // Get OpenCV version - requires successful loading first
-            String version = org.opencv.core.Core.VERSION;
-            String nativePath = org.opencv.core.Core.NATIVE_LIBRARY_NAME;
-            log.info("OpenCV Version: {}, Native Library: {}", version, nativePath);
-
-            // Print some environment info
-            log.info("Java Library Path: {}", System.getProperty("java.library.path"));
-            log.info("Working Directory: {}", System.getProperty("user.dir"));
-        } catch (Exception e) {
-            log.warn("Could not print OpenCV details: {}", e.getMessage());
         }
     }
 

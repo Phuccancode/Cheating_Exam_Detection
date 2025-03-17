@@ -31,3 +31,6 @@ build/
 
 ### VS Code ###
 .vscode/
+### Evidence Files ###
+/evidence/
+/evidence_docker/

@@ -11,8 +11,6 @@ import org.opencv.imgproc.Imgproc;
 import org.opencv.objdetect.CascadeClassifier;
 import org.opencv.videoio.VideoCapture;
 import org.opencv.videoio.Videoio;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
@@ -44,16 +42,15 @@ public class CheatingDetectionService {
     private CascadeClassifier faceCascade;
     private CascadeClassifier eyesCascade;
 
-    @Value("${opencv.haar.face:classpath:haarcascades/haarcascade_frontalface_default.xml}")
-    private String faceClassifierPath;
-
-    @Value("${opencv.haar.eye:classpath:haarcascades/haarcascade_eye.xml}")
-    private String eyeClassifierPath;
+//    @Value("${opencv.haar.face:classpath:haarcascades/haarcascade_frontalface_default.xml}")
+//    private String faceClassifierPath;
+//
+//    @Value("${opencv.haar.eye:classpath:haarcascades/haarcascade_eye.xml}")
+//    private String eyeClassifierPath;
 
     @Value("${evidence.folder:evidence}")
     private String evidenceFolder;
 
-    @Autowired
     public CheatingDetectionService(SuspiciousActivityRepository suspiciousActivityRepository) {
         this.suspiciousActivityRepository = suspiciousActivityRepository;
     }

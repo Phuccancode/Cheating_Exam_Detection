@@ -13,6 +13,7 @@ import java.nio.file.Paths;
 
 @Component
 public class OpenCVConfig {
+     
 
     private static final Logger log = LoggerFactory.getLogger(OpenCVConfig.class);
 
